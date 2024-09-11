@@ -5,15 +5,18 @@ import envi
 import collections
 import random
 
-class DQN(tf.keras.Model):
+print("Num GPUs Available: ", len(tf.config.experimental.list_physical_devices('GPU')))
+class DuelingDQN(tf.keras.Model):
     def __init__(self, num_actions):
-        super(DQN, self).__init__()
+        super(DuelingDQN, self).__init__()
         self.conv1 = layers.Conv2D(32, 8, strides=4, activation='relu')
         self.conv2 = layers.Conv2D(64, 4, strides=2, activation='relu')
         self.conv3 = layers.Conv2D(64, 3, strides=1, activation='relu')
         self.flatten = layers.Flatten()
+
         self.fc1 = layers.Dense(512, activation='relu')
-        self.fc2 = layers.Dense(num_actions)
+        self.fc_value = layers.Dense(1)
+        self.fc_adv = layers.Dense(num_actions)
 
     def call(self, inputs):
         x = self.conv1(inputs)
@@ -21,13 +24,19 @@ class DQN(tf.keras.Model):
         x = self.conv3(x)
         x = self.flatten(x)
         x = self.fc1(x)
-        return self.fc2(x)
+
+        value = self.fc_value(x)
+        adv = self.fc_adv(x)
+
+        q_values = value + (adv - tf.reduce_mean(adv, axis=1, keepdims=True))
+        return q_values
+
 
 env = envi.ScrcpyGameEnv()
 
 num_actions = np.prod(env.action_space.nvec)  
-model = DQN(num_actions)
-target_model = DQN(num_actions)
+model = DuelingDQN(num_actions)
+target_model = DuelingDQN(num_actions)
 target_model.set_weights(model.get_weights())
 
 
@@ -59,8 +68,11 @@ def train_step(batch_size, gamma):
     next_states = np.array(next_states)
     dones = np.array(dones)
 
-    future_qs = target_model.predict(next_states)
-    max_future_qs = np.max(future_qs, axis=1)
+    future_qs = model.predict(next_states)
+    best_action_idxs = np.argmax(future_qs, axis=1)
+    future_qs_target = target_model.predict(next_states)
+    max_future_qs = future_qs_target[np.arange(batch_size), best_action_idxs]
+
     updated_qs = rewards + gamma * max_future_qs * (1 - dones)
 
     masks = tf.one_hot([np.ravel_multi_index(action, env.action_space.nvec) for action in actions], num_actions)
@@ -72,9 +84,11 @@ def train_step(batch_size, gamma):
     grads = tape.gradient(loss, model.trainable_variables)
     optimizer.apply_gradients(zip(grads, model.trainable_variables))
 
-epsilon = 1.0  # initial exploration rate
+
+epsilon = 1.0  # Initial exploration rate
 epsilon_min = 0.1
-epsilon_decay = 0.999
+epsilon_decay = 0.995  # Less aggressive decay
+
 batch_size = 32
 num_episodes = 1000
 max_steps_per_episode = 1000
@@ -87,7 +101,7 @@ for episode in range(num_episodes):
     episode_reward = 0
 
     for step in range(max_steps_per_episode):
-        print(int(step))
+        print("Step", int(step))
         action = choose_action(state, epsilon)
         next_state, reward, done, _ = env.step(action)
         next_state = preprocess_observation(next_state)
@@ -98,7 +112,7 @@ for episode in range(num_episodes):
         train_step(batch_size, gamma)
 
         state = next_state
-
+        print("Episode Reward", episode_reward)
         if done:
             break
 

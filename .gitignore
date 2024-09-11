@@ -1,0 +1,11 @@
+__pycache__
+separate/
+venv/
+scrcpy-win64-v2.4/
+resources/others/
+temp/
+screenshots/
+foxdetecttest.py
+patternmatchingtest.py
+takescreenshot.py
+detection/
