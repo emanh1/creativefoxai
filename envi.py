@@ -7,6 +7,7 @@ import time
 from config import *
 import os
 from datetime import datetime
+from ultralytics import YOLO
 
 orig_dir = os.getcwd()
 adb_dir = os.path.join(os.getcwd(), "scrcpy-win64-v2.4")
@@ -39,14 +40,7 @@ class ScrcpyGameEnv(gym.Env):
         self.observation_space = spaces.Box(low=0, high=255, shape=(2336, 1080, 1), dtype=np.uint8)
         command = [SCRCPY_PATH, "--select-usb"]
         self.scrcpy_proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.player_imgs = [
-            'resources\\0.png', 'resources\\1.png', 'resources\\2.png',
-            'resources\\3.png', 'resources\\4.png', 'resources\\5.png',
-            'resources\\6.png', 'resources\\7.png', 'resources\\8.png',
-            'resources\\9.png', 'resources\\10.png', 'resources\\11.png',
-            'resources\\13.png', 'resources\\14.png', 'resources\\15.png',
-            'resources\\16.png', 'resources\\17.png', 'resources\\18.png'
-        ]
+        self.model = YOLO('obb/creative_fox.pt')
     def reset(self):
         self.pause_menu('pause')
         self.pause_menu('restart')
@@ -77,9 +71,6 @@ class ScrcpyGameEnv(gym.Env):
 
 
     def capture_screen(self):
-        #     os.system('scrcpy-win64-v2.4\\adb.exe exec-out screencap -p > screenshot.png')
-        #     img = cv2.imread('screenshot.png')
-        #     return img
         command = f"{adb_dir}/adb.exe exec-out screencap -p"
         proc = subprocess.Popen(command.split(), stdout=subprocess.PIPE)
         screen_data = proc.stdout.read()
@@ -126,21 +117,25 @@ class ScrcpyGameEnv(gym.Env):
         return 0
 
     def get_player_position(self, screen):
-        player_imgs = [cv2.imread(img_path) for img_path in self.player_imgs]
+        results = self.model(screen)
+
         best_score = 0
         best_pos = None
         best_rect = None
-        for player_img in player_imgs:
-            h, w = player_img.shape[:2]
-            res = cv2.matchTemplate(screen, player_img, cv2.TM_SQDIFF_NORMED)
-            _, max_val, max_loc, _ = cv2.minMaxLoc(res)
-            if max_val > best_score:
-                best_score = max_val
-                best_pos = (max_loc[0] + w // 2, max_loc[1] + h // 2)
-                best_rect = (max_loc[0], max_loc[1], w, h)
-        
+
+        for result in results[0].boxes:
+            class_id = int(result.cls)
+            score = result.conf
+            if class_id == 0 and score > best_score:
+                best_score = score
+                # YOLOv8 returns (x1, y1, x2, y2) for bounding box
+                x1, y1, x2, y2 = map(int, result.xyxy[0])
+                # Calculate the center of the bounding box
+                best_pos = ((x1 + x2) // 2, (y1 + y2) // 2)
+                best_rect = (x1, y1, x2 - x1, y2 - y1)
+
         if best_score >= 0.6:
-            #print(best_pos)
+            # Draw the bounding box around the detected player
             if best_rect:
                 cv2.rectangle(screen, (best_rect[0], best_rect[1]), 
                             (best_rect[0] + best_rect[2], best_rect[1] + best_rect[3]), 
@@ -149,7 +144,7 @@ class ScrcpyGameEnv(gym.Env):
             cv2.imwrite(f"screenshot_{timestamp}.png", screen)
             return best_pos
         else:
-            #print("can't get pos")
+            # Can't detect the player's position
             return None
 
     def check_game_over(self):
