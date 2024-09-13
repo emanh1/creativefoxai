@@ -1,0 +1,6 @@
+path: D:/proj/creative_fox_test/resources/others/trainfinal/datasets
+train: train/images  # directory for training images
+val: val/images    # directory for validation images
+
+nc: 2  # number of classes
+names: ['Enemy', 'Player']  # list of class names
