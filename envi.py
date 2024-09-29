@@ -6,8 +6,9 @@ import cv2
 import time
 from config import *
 import os
-from datetime import datetime
 from ultralytics import YOLO
+from datetime import datetime
+import uiautomator2 as u2
 
 orig_dir = os.getcwd()
 adb_dir = os.path.join(os.getcwd(), "scrcpy-win64-v2.4")
@@ -35,21 +36,25 @@ def hold(x,y,t):
 class ScrcpyGameEnv(gym.Env):
     def __init__(self):
         super(ScrcpyGameEnv, self).__init__()
-        #self.action_space = spaces.MultiDiscrete([3, 2, 11])
+        self.device = u2.connect()
+        #self.device.app_start('com.shing_hk.creative_fox')
         self.action_space = spaces.MultiDiscrete([3, 2, 10])  # 3 move actions, 2 jump actions, 10 duration steps
         self.observation_space = spaces.Box(low=0, high=255, shape=(2336, 1080, 1), dtype=np.uint8)
         command = [SCRCPY_PATH, "--select-usb"]
         self.scrcpy_proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.model = YOLO('obb/creative_fox.pt')
+        self.flag_pole_1 = cv2.imread('resources\\flag_1.png')
+        self.flag_pole_2 = cv2.imread('resources\\flag_2.png')
+        self.dead_sprites = [cv2.imread('resources\\19.png'), cv2.imread('resources\\20.png')]
+
     def reset(self):
         self.pause_menu('pause')
         self.pause_menu('restart')
-        
         observation = self.capture_screen()
         return observation
 
     def step(self, action):
-        reward=0
+        reward = 0
         before_position = self.get_player_position(self.capture_screen())
         self.movement(action)
         time.sleep(0.1 * action[2])  # Wait for the duration of the action
@@ -59,16 +64,14 @@ class ScrcpyGameEnv(gym.Env):
             position_diff = after_position[0] - before_position[0]
             print("Before: ", before_position, "After: ", after_position)
             if position_diff < 0:
-                print("Moved to the left")
                 reward -= 0.1
+                print("Moved left")
             elif position_diff > 0:
-                print("Moved to the right")
                 reward += 1
+                print("Moved right")
         reward += self.calculate_reward()
-        print(f"Current step reward : {reward}")
         done, info = self.check_game_over()
         return observation, reward, done, info
-
 
     def capture_screen(self):
         command = f"{adb_dir}/adb.exe exec-out screencap -p"
@@ -80,13 +83,8 @@ class ScrcpyGameEnv(gym.Env):
     
     def movement(self, action):
         move_action, jump_action, duration = action
-        duration_ms = [100,200,300,400,500,600,700,800,900,1000][duration]  # Fixed durations
-
-        actions = {
-            'left': (280, 950),
-            'right': (555, 950),
-            'up': (2100, 868)
-        }
+        duration_ms = [500,600,700,800,900,1000,1100,1200,1300,4000][duration]  # Fixed durations
+        actions = {'left': (280, 950), 'right': (555, 950), 'up': (2100, 868)}
 
         if jump_action == 1:
             x, y = actions['up']
@@ -98,62 +96,39 @@ class ScrcpyGameEnv(gym.Env):
         elif move_action == 2:
             x, y = actions['right']
             hold(x, y, duration_ms)
+
     def pause_menu(self, action):
-        actions = {
-            'pause':(2250, 169),
-            'unpause':(2200, 400),
-            'restart':(2200, 600)
-        }
-        
-        x,y = actions.get(action, "Invalid")
-        tap_once(x,y)
+        actions = {'pause':(2250, 169), 'unpause':(2200, 400), 'restart':(2200, 600)}
+        x, y = actions.get(action, "Invalid")
+        tap_once(x, y)
+
     def calculate_reward(self):
         done, wl = self.check_game_over()
         if done:
-            if wl=="win":
+            if wl == "win":
                 return 5
-            else :
+            else:
                 return -3
         return 0
 
     def get_player_position(self, screen):
-        results = self.model(screen)
-
-        best_score = 0
+        results = self.model.predict(np.array(screen))
         best_pos = None
-        best_rect = None
-
-        for result in results[0].boxes:
-            class_id = int(result.cls)
-            score = result.conf
-            if class_id == 0 and score > best_score:
-                best_score = score
-                # YOLOv8 returns (x1, y1, x2, y2) for bounding box
-                x1, y1, x2, y2 = map(int, result.xyxy[0])
-                # Calculate the center of the bounding box
-                best_pos = ((x1 + x2) // 2, (y1 + y2) // 2)
-                best_rect = (x1, y1, x2 - x1, y2 - y1)
-
-        if best_score >= 0.6:
-            # Draw the bounding box around the detected player
-            if best_rect:
-                cv2.rectangle(screen, (best_rect[0], best_rect[1]), 
-                            (best_rect[0] + best_rect[2], best_rect[1] + best_rect[3]), 
-                            (0, 0, 255), 2)  # Draw red rectangle
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            cv2.imwrite(f"screenshot_{timestamp}.png", screen)
-            return best_pos
-        else:
-            # Can't detect the player's position
-            return None
+        for result in results:
+            boxes = result.boxes.xyxy
+            class_ids = result.boxes.cls
+            for box, class_id in zip(boxes, class_ids):
+                class_id = int(class_id)
+                if class_id == 1:
+                    x1, y1, x2, y2 = box.tolist()
+                    best_pos = (int((x1 + x2) // 2), int((y1 + y2) // 2))
+        return best_pos
 
     def check_game_over(self):
         def check_win():
-            flag_pole_1 = cv2.imread('resources\\flag_1.png')
-            flag_pole_2 = cv2.imread('resources\\flag_2.png')
             frame = self.capture_screen()
-            result1 = cv2.matchTemplate(frame, flag_pole_1, cv2.TM_CCOEFF_NORMED)
-            result2 = cv2.matchTemplate(frame, flag_pole_2, cv2.TM_CCOEFF_NORMED)
+            result1 = cv2.matchTemplate(frame, self.flag_pole_1, cv2.TM_CCOEFF_NORMED)
+            result2 = cv2.matchTemplate(frame, self.flag_pole_2, cv2.TM_CCOEFF_NORMED)
 
             # threshold compare to match confidence
             threshold = 0.8
@@ -176,7 +151,7 @@ class ScrcpyGameEnv(gym.Env):
                 return False
 
         def check_lose():
-            dead_sprites = [cv2.imread('resources\\19.png'), cv2.imread('resources\\20.png')]
+            dead_sprites = self.dead_sprites
             frame = self.capture_screen()
             for sprite in dead_sprites:
                 result = cv2.matchTemplate(frame, sprite, cv2.TM_CCOEFF_NORMED)
